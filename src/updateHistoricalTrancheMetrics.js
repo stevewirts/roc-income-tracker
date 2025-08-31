@@ -6,7 +6,7 @@
  * then locks the spacer column width to 10px.
  */
 function updateHistoricalTrancheMetrics() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ss    = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName("Transactions");
 
   // 1) Read all data + find existing column indexes
@@ -46,9 +46,10 @@ function updateHistoricalTrancheMetrics() {
   sheet.getRange(2, spacerCol1, numRows, 1)
        .setBackground("#D0E7E5");
 
-  // 4) Define which fields we’ll rebuild (no CurrentPrice)
+  // 4) Define which fields we’ll rebuild (including DivPerShr after TrancheID)
   const rebuilt = [
     "TrancheID",
+    "DivPerShr",
     "WeekStart",
     "CostBasis",
     "RocAmount",
@@ -74,7 +75,7 @@ function updateHistoricalTrancheMetrics() {
   // 6) Rewrite the rebuilt headers row
   sheet.getRange(1, firstRebuilt1, 1, rebuilt.length).setValues([rebuilt]);
 
-  // 7) Full hover-notes map for every header, old + new
+  // 7) Full hover-notes map, including DivPerShr
   const notes = {
     "Date":              "Trade settlement date.",
     "Type":              "Event type: buy, sell, or dividend.",
@@ -82,15 +83,16 @@ function updateHistoricalTrancheMetrics() {
     "RocPct":            "Return‐of‐capital percentage (0–1).",
     "Shares":            "Number of shares for this event.",
     "Price":             "Trade price per share.",
-    "Dividend":          "Gross dividend per share.",
+    "Dividend":          "Gross dividend total for the event.",
     "TrancheIDOverride": "Manual override for the tranche ID.",
     "TrancheID":         "Calculated tranche identifier (YYMMDD suffix).",
+    "DivPerShr":         "Dividend per share = TotalDividend ÷ TotalSharesHeld.",
     "WeekStart":         "Monday date of the event’s week.",
     "CostBasis":         "Shares × Price for buy events.",
     "RocAmount":         "Return‐of‐capital portion of dividend.",
     "TaxableIncome":     "Taxable portion of dividend income.",
     "Income":            "Total dividend income (ROC + taxable).",
-    "IncomePerShare":    "Dividend income per share (taxable only).",
+    "IncomePerShare":    "Taxable income per share.",
     "TotalShares":       "Running cumulative shares held.",
     "RemShares":         "Remaining shares in this tranche.",
     "TrancheStatus":     "Open, Partial, or Closed status."
@@ -120,6 +122,8 @@ function updateHistoricalTrancheMetrics() {
     sheet.getRange(2, fCols[c] + 1, numRows, 1)
          .setNumberFormat("$#,##0.00");
   });
+  sheet.getRange(2, fCols["DivPerShr"] + 1, numRows, 1)
+       .setNumberFormat("$#,##0.0000");
   sheet.getRange(2, fCols["IncomePerShare"] + 1, numRows, 1)
        .setNumberFormat("$#,##0.0000");
   ["TotalShares", "RemShares"].forEach(c => {
@@ -138,6 +142,8 @@ function updateHistoricalTrancheMetrics() {
     const px     = parseFloat(
                      String(r[priceIdx] || "").replace(/[^0-9.\-]/g, "")
                    ) || 0;
+    const pct    = parseFloat(r[rocPctIdx]) || 0;
+    const dvTot  = parseFloat(r[divIdx])    || 0;
 
     // WeekStart
     sheet.getRange(rowNum, fCols["WeekStart"] + 1)
@@ -149,7 +155,7 @@ function updateHistoricalTrancheMetrics() {
            .setValue(sh * px);
     }
 
-    // Running total shares
+    // Running total shares (buys + sells only)
     symbolRun[sym] = (symbolRun[sym] || 0)
                    + (type === "buy" ? sh
                       : type === "sell" ? -sh
@@ -157,20 +163,20 @@ function updateHistoricalTrancheMetrics() {
     sheet.getRange(rowNum, fCols["TotalShares"] + 1)
          .setValue(symbolRun[sym]);
 
-    // Dividend breakdown
+    // Dividend breakdown (uses cumulative shares for per-share calc)
     if (type === "dividend") {
-      const pct    = parseFloat(r[rocPctIdx]) || 0;
-      const dv     = parseFloat(r[divIdx])    || 0;
-      const ts     = symbolRun[sym]           || 0;
-      const rocAmt = pct * dv * ts;
-      const taxInc = (1 - pct) * dv * ts;
-      const ips    = (1 - pct) * dv;
-      const inc    = rocAmt + taxInc || dv * ts;
+      const ts        = symbolRun[sym] || 0;
+      const divPerShr = ts ? dvTot / ts : 0;
+      const rocAmt    = pct * dvTot;
+      const taxInc    = (1 - pct) * dvTot;
+      const incPS     = (1 - pct) * divPerShr;
+      const totalI    = dvTot;
 
-      if (rocAmt) sheet.getRange(rowNum, fCols["RocAmount"] + 1).setValue(rocAmt);
-      if (taxInc) sheet.getRange(rowNum, fCols["TaxableIncome"] + 1).setValue(taxInc);
-      if (ips)    sheet.getRange(rowNum, fCols["IncomePerShare"] + 1).setValue(ips);
-      if (inc)    sheet.getRange(rowNum, fCols["Income"] + 1).setValue(inc);
+      sheet.getRange(rowNum, fCols["DivPerShr"] + 1).setValue(divPerShr);
+      if (rocAmt)  sheet.getRange(rowNum, fCols["RocAmount"]      + 1).setValue(rocAmt);
+      if (taxInc)  sheet.getRange(rowNum, fCols["TaxableIncome"]  + 1).setValue(taxInc);
+      if (incPS)   sheet.getRange(rowNum, fCols["IncomePerShare"] + 1).setValue(incPS);
+      if (totalI)  sheet.getRange(rowNum, fCols["Income"]          + 1).setValue(totalI);
     }
   });
 
@@ -181,14 +187,11 @@ function updateHistoricalTrancheMetrics() {
     const rowNum = i + 2;
     const type   = String(r[typeIdx] || "").toLowerCase();
 
-    // dividend rows get no TrancheID
     if (type === "dividend") {
       assigned[i] = null;
-      // ensure the cell stays blank
       return;
     }
 
-    // override or auto-generate ID
     let tid = r[overrideIdx];
     if (!tid) {
       const key = String(r[symIdx]).trim().toUpperCase()
@@ -254,6 +257,7 @@ function updateHistoricalTrancheMetrics() {
   // lock spacer column to exactly 10px
   sheet.setColumnWidth(spacerCol1, 10);
 }
+
 
 
 /**
