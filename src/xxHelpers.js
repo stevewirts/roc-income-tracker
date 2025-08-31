@@ -103,5 +103,20 @@ function getSheetData(sheet) {
   });
 }
 
+/**
+ * Returns the zero-based index of the first matching header in `headers`.
+ * @param {string[]} headers   The sheet’s header row.
+ * @param {string[]} options   Possible names, in priority order.
+ * @returns {number}           Index of the first match, or -1 if none.
+ */
+function findHeaderIndex(headers, options) {
+  for (let i = 0; i < options.length; i++) {
+    const idx = headers.indexOf(options[i]);
+    if (idx >= 0) return idx;
+  }
+  return -1;
+}
+
+
 
 

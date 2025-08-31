@@ -1,37 +1,42 @@
 /**
- * Reads your Transactions sheet,
- * injects a blank spacer column after TrancheIDOverride,
- * computes WeekStart for each record,
- * writes everything back, auto‐resizes,
- * then locks the spacer column width to 10px.
+ * updateHistoricalTrancheMetrics()
+ *
+ * Reads the Transactions sheet, inserts a spacer column after TIDOverride,
+ * then rebuilds the metrics columns to the right—removing the redundant Inc
+ * field, renaming TaxInc → Inc, placing RocPS after IncPS, with columns
+ * ordered as requested.
  */
 function updateHistoricalTrancheMetrics() {
   const ss    = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName("Transactions");
 
-  // 1) Read all data + find existing column indexes
-  const raw = sheet.getDataRange().getValues();
-  const headers     = raw[0];
+  // 1) Read all data & locate fixed-left columns
+  const raw     = sheet.getDataRange().getValues();
+  const headers = raw[0];
   const dateIdx     = headers.indexOf("Date");
   const typeIdx     = headers.indexOf("Type");
-  const symIdx      = headers.indexOf("Symbol");
+  const symIdx      = headers.indexOf("Sym");
   const rocPctIdx   = headers.indexOf("RocPct");
-  const sharesIdx   = headers.indexOf("Shares");
+  const sharesIdx   = headers.indexOf("Shr");
   const priceIdx    = headers.indexOf("Price");
-  const divIdx      = headers.indexOf("Dividend");
-  const overrideIdx = headers.indexOf("TrancheIDOverride");
+  const distIdx     = headers.indexOf("Dist");
+  const overrideIdx = headers.indexOf("TIDOverride");
 
-  if ([dateIdx, typeIdx, symIdx, rocPctIdx, sharesIdx, priceIdx, divIdx, overrideIdx]
-      .some(i => i < 0)) {
+  if (
+    [dateIdx, typeIdx, symIdx, rocPctIdx, sharesIdx, priceIdx, distIdx, overrideIdx]
+      .some(i => i < 0)
+  ) {
     throw new Error(
-      "Missing one of the required headers: Date, Type, Symbol, RocPct, Shares, Price, Dividend, TrancheIDOverride"
+      "Missing one of the required headers: " +
+      "Date, Type, Sym, ROCPct, Shr, Price, Dist, TIDOverride"
     );
   }
 
-  // 2) Extract only rows with a valid Date
+  // 2) Collect only the valid-date rows
   const rows = [];
   for (let i = 1; i < raw.length; i++) {
-    if (raw[i][dateIdx] instanceof Date && !isNaN(raw[i][dateIdx])) {
+    const cell = raw[i][dateIdx];
+    if (cell instanceof Date && !isNaN(cell)) {
       rows.push(raw[i]);
     } else {
       break;
@@ -39,75 +44,82 @@ function updateHistoricalTrancheMetrics() {
   }
   const numRows = rows.length;
 
-  // 3) Insert spacer column immediately after TrancheIDOverride
-  const spacerCol1 = overrideIdx + 2;      // 1-based index of new spacer
+  // 3) Insert blank spacer column after TIDOverride
+  const spacerCol1 = overrideIdx + 2;  // 1-based index
   sheet.insertColumnAfter(overrideIdx + 1);
   sheet.getRange(1, spacerCol1).setValue(" ");
-  sheet.getRange(2, spacerCol1, numRows, 1)
-       .setBackground("#D0E7E5");
+  sheet
+    .getRange(2, spacerCol1, numRows, 1)
+    .setBackground("#D0E7E5");
 
-  // 4) Define which fields we’ll rebuild (including DivPerShr after TrancheID)
+  // 4) Define rebuilt headers (to the right of spacer),
+  //    in this order: WkStart, TrID, CostBasis, DistPS, IncPS, RocPS, Inc, ROCAmt, TotShr, RemShr, TStat
   const rebuilt = [
-    "TrancheID",
-    "DivPerShr",
-    "WeekStart",
+    "WkStart",   // WeekStart
+    "TrID",      // TrancheID
     "CostBasis",
-    "RocAmount",
-    "TaxableIncome",
-    "Income",
-    "IncomePerShare",
-    "TotalShares",
-    "RemShares",
-    "TrancheStatus"
+    "DistPS",    // distribution per share
+    "IncPS",     // taxable income per share
+    "RocPS",     // return-of-capital per share
+    "Inc",       // taxable portion of distribution (renamed from TaxInc)
+    "ROCAmt",    // return-of-capital amount
+    "TotShr",    // running total shares
+    "RemShr",    // remaining shares in tranche
+    "TStat"      // tranche status
   ];
 
-  // 5) Clear everything to the right of the spacer
+  // 5) Clear everything to the right of spacer, then write rebuilt headers
   const lastCol       = sheet.getLastColumn();
   const firstRebuilt1 = spacerCol1 + 1;
   const colsToClear   = lastCol - firstRebuilt1 + 1;
   if (colsToClear > 0) {
-    sheet.getRange(1, firstRebuilt1, numRows + 1, colsToClear)
-         .clearContent()
-         .clearFormat()
-         .setNumberFormat("General");
+    sheet
+      .getRange(1, firstRebuilt1, numRows + 1, colsToClear)
+      .clearContent()
+      .clearFormat()
+      .setNumberFormat("General");
   }
+  sheet
+    .getRange(1, firstRebuilt1, 1, rebuilt.length)
+    .setValues([rebuilt]);
 
-  // 6) Rewrite the rebuilt headers row
-  sheet.getRange(1, firstRebuilt1, 1, rebuilt.length).setValues([rebuilt]);
-
-  // 7) Full hover-notes map, including DivPerShr
+  // 6) Notes map for headers
   const notes = {
-    "Date":              "Trade settlement date.",
-    "Type":              "Event type: buy, sell, or dividend.",
-    "Symbol":            "Ticker symbol of the security.",
-    "RocPct":            "Return‐of‐capital percentage (0–1).",
-    "Shares":            "Number of shares for this event.",
-    "Price":             "Trade price per share.",
-    "Dividend":          "Gross dividend total for the event.",
-    "TrancheIDOverride": "Manual override for the tranche ID.",
-    "TrancheID":         "Calculated tranche identifier (YYMMDD suffix).",
-    "DivPerShr":         "Dividend per share = TotalDividend ÷ TotalSharesHeld.",
-    "WeekStart":         "Monday date of the event’s week.",
-    "CostBasis":         "Shares × Price for buy events.",
-    "RocAmount":         "Return‐of‐capital portion of dividend.",
-    "TaxableIncome":     "Taxable portion of dividend income.",
-    "Income":            "Total dividend income (ROC + taxable).",
-    "IncomePerShare":    "Taxable income per share.",
-    "TotalShares":       "Running cumulative shares held.",
-    "RemShares":         "Remaining shares in this tranche.",
-    "TrancheStatus":     "Open, Partial, or Closed status."
+    Date:        "Trade settlement date.",
+    Type:        "Event type: buy, sell, or dividend.",
+    Sym:         "Ticker symbol.",
+    ROCPct:      "Return-of-capital % (0–1).",
+    Shr:         "Number of shares.",
+    Price:       "Price per share.",
+    Dist:        "Distribution = Inc + ROCAmt.",
+    TIDOverride:"Manual tranche ID override.",
+    WkStart:     "Monday of the event’s week.",
+    TrID:        "Calculated tranche identifier (YYMMDD_A...).",
+    CostBasis:   "Shares × Price for buy/sell events.",
+    DistPS:      "Distribution per share = Dist ÷ TotalShares.",
+    IncPS:       "Taxable income per share = Inc ÷ TotalShares.",
+    RocPS:       "Return-of-capital per share = ROCAmt ÷ TotalShares.",
+    Inc:         "Taxable portion of the distribution.",
+    ROCAmt:      "Return-of-capital portion of the distribution.",
+    TotShr:      "Running total shares held.",
+    RemShr:      "Remaining shares in this tranche.",
+    TStat:       "Open, Partial, or Closed tranche status."
   };
 
-  // 8) Apply notes to every header cell
-  const allHdrs = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  // 7) Apply notes to headers
+  const allHdrs = sheet
+    .getRange(1, 1, 1, sheet.getLastColumn())
+    .getValues()[0];
   allHdrs.forEach((h, j) => {
     if (notes[h]) {
       sheet.getRange(1, j + 1).setNote(notes[h]);
     }
   });
 
-  // 9) Build a name→column map for our rebuilt fields
-  const updatedHdrs = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  // 8) Build name→index map for rebuilt fields
+  const updatedHdrs = sheet
+    .getRange(1, 1, 1, sheet.getLastColumn())
+    .getValues()[0];
   const fCols = {};
   rebuilt.forEach(name => {
     const idx = updatedHdrs.indexOf(name);
@@ -115,23 +127,28 @@ function updateHistoricalTrancheMetrics() {
     fCols[name] = idx;
   });
 
-  // 10) Set number/date formats for rebuilt columns
-  sheet.getRange(2, fCols["WeekStart"] + 1, numRows, 1)
-       .setNumberFormat("yyyy-MM-dd");
-  ["CostBasis", "RocAmount", "TaxableIncome", "Income"].forEach(c => {
-    sheet.getRange(2, fCols[c] + 1, numRows, 1)
-         .setNumberFormat("$#,##0.00");
+  // 9) Set number/date formats for rebuilt columns
+  sheet
+    .getRange(2, fCols["WkStart"] + 1, numRows, 1)
+    .setNumberFormat("yyyy-MM-dd");
+  ["CostBasis", "ROCAmt", "Inc"].forEach(c => {
+    sheet
+      .getRange(2, fCols[c] + 1, numRows, 1)
+      .setNumberFormat("$#,##0.00");
   });
-  sheet.getRange(2, fCols["DivPerShr"] + 1, numRows, 1)
-       .setNumberFormat("$#,##0.0000");
-  sheet.getRange(2, fCols["IncomePerShare"] + 1, numRows, 1)
-       .setNumberFormat("$#,##0.0000");
-  ["TotalShares", "RemShares"].forEach(c => {
-    sheet.getRange(2, fCols[c] + 1, numRows, 1)
-         .setNumberFormat("0.0000");
+  ["DistPS", "IncPS", "RocPS"].forEach(c => {
+    sheet
+      .getRange(2, fCols[c] + 1, numRows, 1)
+      .setNumberFormat("$#,##0.0000");
+  });
+  ["TotShr", "RemShr"].forEach(c => {
+    sheet
+      .getRange(2, fCols[c] + 1, numRows, 1)
+      .setNumberFormat("0.0000");
   });
 
-  // 11) Populate WeekStart, CostBasis, running TotalShares, and dividend metrics
+  // 10) Populate WeekStart, CostBasis, running shares,
+  //     and distribution breakdown fields
   const symbolRun = {};
   rows.forEach((r, i) => {
     const rowNum = i + 2;
@@ -139,54 +156,55 @@ function updateHistoricalTrancheMetrics() {
     const type   = String(r[typeIdx] || "").toLowerCase();
     const sym    = String(r[symIdx]  || "").trim().toUpperCase();
     const sh     = parseFloat(r[sharesIdx]) || 0;
-    const px     = parseFloat(
-                     String(r[priceIdx] || "").replace(/[^0-9.\-]/g, "")
-                   ) || 0;
+    const px     =
+      parseFloat(String(r[priceIdx] || "").replace(/[^0-9.\-]/g, "")) || 0;
     const pct    = parseFloat(r[rocPctIdx]) || 0;
-    const dvTot  = parseFloat(r[divIdx])    || 0;
+    const rawDist= parseFloat(r[distIdx])   || 0;
 
     // WeekStart
-    sheet.getRange(rowNum, fCols["WeekStart"] + 1)
-         .setValue(getWeekStart(dt));
+    sheet
+      .getRange(rowNum, fCols["WkStart"] + 1)
+      .setValue(getWeekStart(dt));
 
-    // CostBasis for buys
-    if (type === "buy" && sh) {
-      sheet.getRange(rowNum, fCols["CostBasis"] + 1)
-           .setValue(sh * px);
+    // CostBasis for buy/sell
+    if (type === "buy" || type === "sell") {
+      sheet
+        .getRange(rowNum, fCols["CostBasis"] + 1)
+        .setValue(sh * px);
     }
 
-    // Running total shares (buys + sells only)
+    // Running total shares
     symbolRun[sym] = (symbolRun[sym] || 0)
-                   + (type === "buy" ? sh
+                   + (type === "buy"  ?  sh
                       : type === "sell" ? -sh
-                      : 0);
-    sheet.getRange(rowNum, fCols["TotalShares"] + 1)
-         .setValue(symbolRun[sym]);
+                                         : 0);
+    sheet
+      .getRange(rowNum, fCols["TotShr"] + 1)
+      .setValue(symbolRun[sym]);
 
-    // Dividend breakdown (uses cumulative shares for per-share calc)
+    // On dividend rows, fill DistPS, IncPS, RocPS, Inc, ROCAmt
     if (type === "dividend") {
-      const ts        = symbolRun[sym] || 0;
-      const divPerShr = ts ? dvTot / ts : 0;
-      const rocAmt    = pct * dvTot;
-      const taxInc    = (1 - pct) * dvTot;
-      const incPS     = (1 - pct) * divPerShr;
-      const totalI    = dvTot;
+      const ts     = symbolRun[sym] || 0;
+      const rocAmt = pct * rawDist;
+      const incAmt = (1 - pct) * rawDist;
+      const incPS  = ts ? incAmt  / ts : 0;
+      const rocPS  = ts ? rocAmt  / ts : 0;
+      const distPS = ts ? rawDist / ts : 0;
 
-      sheet.getRange(rowNum, fCols["DivPerShr"] + 1).setValue(divPerShr);
-      if (rocAmt)  sheet.getRange(rowNum, fCols["RocAmount"]      + 1).setValue(rocAmt);
-      if (taxInc)  sheet.getRange(rowNum, fCols["TaxableIncome"]  + 1).setValue(taxInc);
-      if (incPS)   sheet.getRange(rowNum, fCols["IncomePerShare"] + 1).setValue(incPS);
-      if (totalI)  sheet.getRange(rowNum, fCols["Income"]          + 1).setValue(totalI);
+      sheet.getRange(rowNum, fCols["DistPS"] + 1).setValue(distPS);
+      sheet.getRange(rowNum, fCols["IncPS"]  + 1).setValue(incPS);
+      sheet.getRange(rowNum, fCols["RocPS"]  + 1).setValue(rocPS);
+      sheet.getRange(rowNum, fCols["Inc"]    + 1).setValue(incAmt);
+      sheet.getRange(rowNum, fCols["ROCAmt"] + 1).setValue(rocAmt);
     }
   });
 
-  // 12) Assign TrancheIDs (override or auto-generate), but skip dividends
+  // 11) Assign Tranche IDs (skip dividends)
   const trancheMap = {};
   const assigned   = [];
   rows.forEach((r, i) => {
     const rowNum = i + 2;
     const type   = String(r[typeIdx] || "").toLowerCase();
-
     if (type === "dividend") {
       assigned[i] = null;
       return;
@@ -204,18 +222,18 @@ function updateHistoricalTrancheMetrics() {
       tid = key + "_" + String.fromCharCode(65 + cnt);
       trancheMap[key] = cnt + 1;
     }
-
-    sheet.getRange(rowNum, fCols["TrancheID"] + 1).setValue(tid);
+    sheet.getRange(rowNum, fCols["TrID"] + 1).setValue(tid);
     assigned[i] = tid;
   });
 
-  // 13) Compute remaining shares, status & color “Partial” red
+  // 12) Compute RemShr & TStat, highlight “Partial”
   const buys = {};
   rows.forEach((r, i) => {
-    if (String(r[typeIdx]).toLowerCase() === "buy") {
-      const s  = parseFloat(r[sharesIdx]) || 0;
-      const id = assigned[i];
-      if (id) buys[id] = (buys[id] || 0) + s;
+    const type = String(r[typeIdx] || "").toLowerCase();
+    const id   = assigned[i];
+    if (type === "buy" && id) {
+      const s = parseFloat(r[sharesIdx]) || 0;
+      buys[id] = (buys[id] || 0) + s;
     }
   });
 
@@ -225,9 +243,11 @@ function updateHistoricalTrancheMetrics() {
     const id     = assigned[i];
     if (!id || type === "dividend") return;
 
+    // sum sells through this row
     const sold = rows.reduce((sum, r2, j) => {
+      const t2 = String(r2[typeIdx]).toLowerCase();
       if (
-        String(r2[typeIdx]).toLowerCase() === "sell" &&
+        t2 === "sell" &&
         assigned[j] === id &&
         new Date(r2[dateIdx]) <= new Date(r[dateIdx])
       ) {
@@ -238,25 +258,30 @@ function updateHistoricalTrancheMetrics() {
 
     const total     = buys[id] || 0;
     const remaining = total - sold;
-    const status    = remaining === 0 ? "Closed"
-                    : remaining < total    ? "Partial"
-                                           : "Open";
+    const status    =
+      remaining === 0    ? "Closed" :
+      remaining < total  ? "Partial" :
+                           "Open";
 
-    sheet.getRange(rowNum, fCols["RemShares"] + 1).setValue(remaining);
+    sheet
+      .getRange(rowNum, fCols["RemShr"] + 1)
+      .setValue(remaining);
 
-    const sc = sheet.getRange(rowNum, fCols["TrancheStatus"] + 1);
+    const sc = sheet.getRange(rowNum, fCols["TStat"] + 1);
     sc.setValue(status);
     sc.setBackground(status === "Partial" ? "#FFCCCC" : null);
   });
 
-  // 14) Final housekeeping
-  autoSizeAllColumns(sheet, 14);
+  // 13) Final housekeeping
+  autoSizeAllColumns(sheet, 4);
   filterHeaders(sheet);
   freezeHeaders(sheet);
 
-  // lock spacer column to exactly 10px
+  // lock spacer column width
+  sheet.setColumnWidth(typeIdx + 1, 100);
   sheet.setColumnWidth(spacerCol1, 10);
 }
+
 
 
 
