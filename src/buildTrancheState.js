@@ -50,14 +50,14 @@ function buildTrancheState() {
 
   const idx = {
     type:      hdr.indexOf("Type"),
-    trancheID: hdr.indexOf("TrancheID"),
-    sym:       hdr.indexOf("Symbol"),
+    trancheID: hdr.indexOf("TrID"),
+    sym:       hdr.indexOf("Sym"),
     date:      hdr.indexOf("Date"),
-    shares:    hdr.indexOf("Shares"),
+    shares:    hdr.indexOf("Shr"),
     price:     hdr.indexOf("Price"),
-    rocAmt:    hdr.indexOf("RocAmount"),
+    rocAmt:    hdr.indexOf("ROCAmt"),
     rocPct:    hdr.indexOf("RocPct"),
-    dividend:  hdr.indexOf("Dividend")
+    dividend:  hdr.indexOf("Dist")
   };
   Object.entries(idx).forEach(([k,v]) => {
     if (v < 0) throw new Error("Missing header '" + k + "'");
@@ -230,9 +230,6 @@ function buildTrancheState() {
   // reapply your red gradient
   addConBasisPctColorScale(stateSheet);
 }
-
-
-
 
 
 function addConBasisPctColorScale(sheet) {
