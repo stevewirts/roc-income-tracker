@@ -116,7 +116,34 @@ function findHeaderIndex(headers, options) {
   }
   return -1;
 }
+/**
+ * Looks up the current price for a given symbol.
+ * Expects a sheet named "Prices" with headers in row 1:
+ *   A: Sym   B: CurrPx
+ */
+function priceGet(sym) {
+  const ss     = SpreadsheetApp.getActive();
+  const pSheet = ss.getSheetByName('MarketData');
+  if (!pSheet) throw new Error('Sheet "Prices" not found');
+  
+  // pull values once
+  const rows   = pSheet.getRange(2, 1, pSheet.getLastRow() - 1, 2).getValues();
+  const map    = rows.reduce((m, [s, p]) => {
+    m[s] = +p;
+    return m;
+  }, {});
+  
+  return map[sym] || 0;
+}
 
+/**
+ * Formats a Date object as yyyy-MM-dd.
+ */
+function formatDate_(dt) {
+  if (!dt) return '';
+  const tz = SpreadsheetApp.getActive().getSpreadsheetTimeZone();
+  return Utilities.formatDate(new Date(dt), tz, 'yyyy-MM-dd');
+}
 
 
 

@@ -1,288 +1,238 @@
+/**
+ * buildTrancheState.gs
+ *
+ * Populates the “TrancheState” sheet with up-to-date position data,
+ * adjusts basis for return-of-capital, computes unrealized gain/loss,
+ * and applies conditional formatting.
+ */
 function buildTrancheState() {
-  const notesMap = {
-    ID:            "Unique tranche identifier",
-    Sym:           "Ticker symbol",
-    BuyDt:         "Date shares were purchased",
-    ShBuy:         "Number of shares bought",
-    BuyPx:         "Purchase price per share",
-    ShSold:        "Number of shares sold",
-    SellPx:        "Latest sale price",
-    ShRem:         "Remaining shares",
-    CurrPx:        "Current market price",
-    CostBasis:     "Original cost basis (PurchasePrice × SharesBought)",
-    AdjBasis:      "Adjusted cost basis (after ROC)",
-    ConBasis:      "Consumed basis",
-    ConBasisPct:   "Consumed basis as percentage of cost basis",
-    MktVal:        "Market value of remaining shares",
-    UnrlGain:      "Unrealized gain",
-    ExitGain:      "Projected gain if sold now",
-    ExitFlg:       "Exit readiness flag",
-    RlzGain:       "Realized gain from sold shares",
-    Status:        "Tranche status (Open, Partial, Closed)",
-    HeldDays:      "Days held since purchase",
-    LTGDays:       "Days until long-term gain threshold"
-  };
+  const ss         = SpreadsheetApp.getActive();
+  const txSheet    = ss.getSheetByName('Transactions');
+  const stateSheet = insureClearedSheet('TrancheState');
+  const today      = new Date();
 
-  const ss          = SpreadsheetApp.getActiveSpreadsheet();
-  const txSheet     = ss.getSheetByName("Transactions");
-  const marketSheet = ss.getSheetByName("MarketData");
-  const stateSheet  = insureClearedSheet("TrancheState");
-  clearSheet(stateSheet, 8);
+  // 1) Read & normalize headers
+  const allRows = txSheet.getDataRange().getValues();
+  const rawHdr  = allRows.shift();
+  const hdr     = rawHdr.map(h => String(h || '').trim());
+  const idx     = hdr.reduce((map, h, i) => ((map[h] = i), map), {});
 
-  // 1) build price lookup
-  const mktData = marketSheet.getDataRange().getValues();
-  const mktHdr  = mktData[0].map(String);
-  const tkrI    = mktHdr.indexOf("Ticker");
-  const pxI     = mktHdr.indexOf("CurrentPrice");
-  if (tkrI < 0 || pxI < 0) {
-    throw new Error("MarketData must have 'Ticker' and 'CurrentPrice'");
-  }
-  const marketMap = {};
-  mktData.slice(1).forEach(r => {
-    const sym = r[tkrI], px = parseFloat(r[pxI]) || 0;
-    if (sym) marketMap[sym] = px;
-  });
-
-  // 2) read & index transactions
-  const txData = txSheet.getDataRange().getValues();
-  const hdr    = txData[0].map(String);
-  const rows   = txData.slice(1);
-
-  const idx = {
-    type:      hdr.indexOf("Type"),
-    trancheID: hdr.indexOf("TrID"),
-    sym:       hdr.indexOf("Sym"),
-    date:      hdr.indexOf("Date"),
-    shares:    hdr.indexOf("Shr"),
-    price:     hdr.indexOf("Price"),
-    rocAmt:    hdr.indexOf("ROCAmt"),
-    rocPct:    hdr.indexOf("RocPct"),
-    dividend:  hdr.indexOf("Dist")
-  };
-  Object.entries(idx).forEach(([k,v]) => {
-    if (v < 0) throw new Error("Missing header '" + k + "'");
-  });
-
-  // 3) init buy tranches
-  const trancheMap = {};
-  const latestSale = {};
-  const rocMap     = {};
-
-  rows.forEach(r => {
-    if (String(r[idx.type]).toLowerCase() !== "buy") return;
-    const id  = r[idx.trancheID];
-    const sym = r[idx.sym];
-    trancheMap[id] = {
-      TrancheID:     id,
-      Symbol:        sym,
-      BuyDate:       r[idx.date],
-      SharesBought:  parseFloat(r[idx.shares])  || 0,
-      PurchasePrice: parseFloat(r[idx.price])   || 0,
-      CurrentPrice:  marketMap[sym]             || 0,
-      SharesSold:    0
-    };
-  });
-
-  // 4) process sells + dividends→ROC
-  rows.forEach(r => {
-    const txType = String(r[idx.type]).toLowerCase();
-    const id     = r[idx.trancheID];
-    const t      = trancheMap[id];
-    if (!t && txType !== "dividend") return;
-
-    // 4a) sell
-    if (t && txType === "sell") {
-      const sold = parseFloat(r[idx.shares]) || 0;
-      const px   = parseFloat(r[idx.price])  || 0;
-      t.SharesSold += sold;
-      const dt = new Date(r[idx.date]);
-      if (!latestSale[id] || dt > latestSale[id].date) {
-        latestSale[id] = { price: px, date: dt };
+  // 2) Validate required columns
+  ['Type','TrID','Sym','Date','Shr','Price','ROCAmt','Inc']
+    .forEach(col => {
+      if (!(col in idx)) {
+        throw new Error(
+          `Missing Transactions header "${col}". Found: [${Object.keys(idx).join(', ')}]`
+        );
       }
+    });
+
+  // 3) Initialize tranche & distribution maps
+  const trancheMap = {};  // { TrID → tranche state }
+  const rocMap     = {};  // { TrID → cumulative ROC }
+  const incMap     = {};  // { TrID → cumulative non-ROC income }
+
+  // 4) Bucket each transaction row
+  allRows.forEach(row => {
+    const type = String(row[idx.Type] || '').toLowerCase();
+
+    // 4a) Dividends distribute ROC + income across all open tranches of that symbol
+    if (type === 'dividend') {
+      const rawROC = parseFloat(String(row[idx.ROCAmt]).replace(/[^0-9.\-]/g, '')) || 0;
+      const rawInc = parseFloat(String(row[idx.Inc]).replace(/[^0-9.\-]/g, ''))   || 0;
+      const sym    = row[idx.Sym];
+
+      const openIDs = Object.keys(trancheMap).filter(id => {
+        const t   = trancheMap[id];
+        const rem = t.ShBuy - t.ShSold;
+        return t.Sym === sym && rem > 0;
+      });
+      const totalRem = openIDs.reduce(
+        (sum, id) => sum + (trancheMap[id].ShBuy - trancheMap[id].ShSold),
+        0
+      );
+
+      if (totalRem > 0) {
+        openIDs.forEach(id => {
+          const t     = trancheMap[id];
+          const rem   = t.ShBuy - t.ShSold;
+          const share = rem / totalRem;
+          rocMap[id]  = (rocMap[id]  || 0) + rawROC * share;
+          incMap[id]  = (incMap[id]  || 0) + rawInc * share;
+        });
+      }
+      return;
     }
 
-    // 4b) dividend ⇒ pro-rata ROC
-    if (txType === "dividend") {
-      const sym = r[idx.sym];
-      // collect all open tranches for this ticker
-      const openIDs = Object.keys(trancheMap)
-                            .filter(key => trancheMap[key].Symbol === sym);
-      // compute total remaining shares
-      const totalRem = openIDs
-        .reduce((sum, key) => {
-          const tr = trancheMap[key];
-          return sum + (tr.SharesBought - tr.SharesSold);
-        }, 0);
-      if (totalRem <= 0) return;
+    // 4b) Buys & sells (requires TrID)
+    const tid = row[idx.TrID];
+    if (!tid) return;
 
-      // clean-parse per-share dividend
-      const rawDiv = r[idx.dividend];
-      const divPS  = parseFloat(String(rawDiv).replace(/[^0-9.\-]/g, "")) || 0;
+    if (!trancheMap[tid]) {
+      trancheMap[tid] = {
+        ID:        tid,
+        Sym:       row[idx.Sym],
+        BuyDt:     null,
+        ShBuy:     0,
+        BuyPx:     0,
+        ShSold:    0,
+        SellPx:    0,
+        CostBasis: 0,
+        Status:    ''
+      };
+    }
+    const t = trancheMap[tid];
 
-      // clean-parse explicit RocAmount
-      const rawAmt = r[idx.rocAmt];
-      const amtVal = parseFloat(String(rawAmt).replace(/[^0-9.\-]/g, ""));
-
-      // clean-parse RocPct
-      const pctVal = parseFloat(String(r[idx.rocPct])
-                     .replace(/[^0-9.\-]/g, "")) / 100 || 0;
-
-      openIDs.forEach(key => {
-        const tr   = trancheMap[key];
-        const rem  = tr.SharesBought - tr.SharesSold;
-        if (rem <= 0) return;
-
-        // use explicit amount if you set one,
-        // otherwise pctVal * (divPS * rem)
-        const rocVal = !isNaN(amtVal) && amtVal > 0
-                     ? amtVal * (rem / totalRem)    // split amt pro-rata
-                     : pctVal * divPS * rem;
-
-        rocMap[key] = (rocMap[key] || 0) + rocVal;
-      });
+    if (type === 'buy') {
+      const qty   = +row[idx.Shr] || 0;
+      const price = parseFloat(String(row[idx.Price]).replace(/[^0-9.\-]/g, '')) || 0;
+      t.ShBuy      += qty;
+      t.CostBasis  += qty * price;
+      t.BuyPx       = price || t.BuyPx;
+      const dt      = new Date(row[idx.Date]);
+      t.BuyDt       = !t.BuyDt || dt < t.BuyDt ? dt : t.BuyDt;
+      t.Status      = row[idx.TStat] || t.Status;
+    }
+    else if (type === 'sell') {
+      const qty   = +row[idx.Shr] || 0;
+      const price = parseFloat(String(row[idx.Price]).replace(/[^0-9.\-]/g, '')) || 0;
+      t.ShSold    += qty;
+      t.SellPx     = price || t.SellPx;
+      t.Status     = row[idx.TStat] || t.Status;
     }
   });
 
-  // 5) build output
-  const keys   = Object.keys(notesMap);
-  const output = [ keys ];
-  const today  = new Date();
+  // 5) Assemble output rows
+  const notesMap = {
+    ID:                "Unique tranche identifier",
+    Sym:               "Ticker symbol",
+    BuyDt:             "Date shares were purchased",
+    ShBuy:             "Number of shares bought",
+    BuyPx:             "Average purchase price",
+    ShSold:            "Shares sold",
+    SellPx:            "Average sale price",
+    ShRem:             "Remaining shares",
+    CurrPx:            "Current market price",
+    CostBasis:         "PurchasePrice × SharesBought",
+    ROC:               "Return of capital allocated to tranche",
+    AdjBasis:          "CostBasis − ROC",
+    CumIncome:         "Non-ROC distributions allocated to tranche",
+    MktValue:          "ShRem × CurrPx",
+    UnrealizedGainLoss:"ShRem × CurrPx − AdjBasis",
+    PctToExit:         "PctToExit = (AdjBasis − MktValue) / AdjBasis; 0% = break-even, 100% = full loss of principal",
+    Status:            "Open, Partial, or Closed",
+    HeldDays:          "Days since BuyDt"
+  };
+  const keys = Object.keys(notesMap);
+  const out  = [keys];
 
   Object.values(trancheMap).forEach(t => {
-    const rem  = t.SharesBought - t.SharesSold;
-    const cost = t.PurchasePrice * t.SharesBought;
-    const roc  = rocMap[t.TrancheID] || 0;
-    const adj  = cost - roc;
-    const con  = roc;
-    const pct  = cost ? con / cost : 0;
+    const rem        = t.ShBuy - t.ShSold;
+    const roc        = rocMap[t.ID] || 0;
+    const inc        = incMap[t.ID] || 0;
+    const costBasis  = t.CostBasis;
+    const adjBasis   = costBasis - roc;
+    const currPx     = priceGet(t.Sym);
+    const mktValue   = rem * currPx;
+    const unrealGain = mktValue - adjBasis;
 
-    const sale = latestSale[t.TrancheID] || {};
-    const sellPx = sale.price || "";
+    // PctToExit ignores CumIncome, clamped 0–1
+    const rawPct    = adjBasis ? (adjBasis - mktValue) / adjBasis : 0;
+    const pctToExit = Math.max(0, Math.min(1, rawPct));
 
-    const mktVal   = rem * t.CurrentPrice;
-    const unrlGain = mktVal - adj;
-    const exitGain = unrlGain;
-    let exitFlg = "";
-    if (rem > 0) {
-      exitFlg = mktVal >= adj           ? "Yes"
-              : mktVal >= 0.98 * adj     ? "Partial"
-              : "";
-    }
-    const rlzGain = (t.SharesSold && sale.price)
-                  ? (sale.price - t.PurchasePrice) * t.SharesSold
-                  : "";
+    const heldDays = t.BuyDt
+      ? Math.floor((today - t.BuyDt) / 86400000)
+      : '';
 
-    let heldDays = "", ltgDays = "";
-    if (t.BuyDate) {
-      const diff = today - new Date(t.BuyDate);
-      heldDays = Math.floor(diff / (1000*60*60*24));
-      ltgDays  = Math.max(0, 365 - heldDays);
-    }
-
-    const rowObj = {
-      ID:           t.TrancheID,
-      Sym:          t.Symbol,
-      BuyDt:        t.BuyDate,
-      ShBuy:        t.SharesBought,
-      BuyPx:        t.PurchasePrice,
-      ShSold:       t.SharesSold || "",
-      SellPx:       sellPx,
-      ShRem:        rem || "",
-      CurrPx:       t.CurrentPrice,
-      CostBasis:    cost,
-      AdjBasis:     adj,
-      ConBasis:     con,
-      ConBasisPct:  pct,
-      MktVal:       mktVal,
-      UnrlGain:     unrlGain,
-      ExitGain:     exitGain,
-      ExitFlg:      exitFlg,
-      RlzGain:      rlzGain,
-      Status:       rem === 0 ? "Closed" : (rem < t.SharesBought ? "Partial" : "Open"),
-      HeldDays:     heldDays,
-      LTGDays:      ltgDays
+    const row = {
+      ID:                t.ID,
+      Sym:               t.Sym,
+      BuyDt:             formatDate_(t.BuyDt),
+      ShBuy:             t.ShBuy,
+      BuyPx:             t.BuyPx,
+      ShSold:            t.ShSold,
+      SellPx:            t.SellPx || '',
+      ShRem:             rem,
+      CurrPx:            currPx,
+      CostBasis:         costBasis,
+      ROC:               roc,
+      AdjBasis:          adjBasis,
+      CumIncome:         inc,
+      MktValue:          mktValue,
+      UnrealizedGainLoss:unrealGain,
+      PctToExit:         pctToExit,
+      Status:            t.Status,
+      HeldDays:          heldDays
     };
-
-    output.push(keys.map(k => rowObj[k]));
+    out.push(keys.map(k => row[k]));
   });
 
-  // 6) write & format
+  // 6) Write & format output
   stateSheet.clearContents();
   stateSheet
-    .getRange(1,1,output.length, output[0].length)
-    .setValues(output);
+    .getRange(1, 1, out.length, keys.length)
+    .setValues(out);
 
-  formatTrancheStateSheet(stateSheet);
   addHeaderNotes(stateSheet, notesMap);
   filterHeaders(stateSheet);
 
-  // percent-format ConBasisPct
-  const pctCol = output[0].indexOf("ConBasisPct") + 1;
-  if (pctCol > 0) {
-    stateSheet
-      .getRange(2, pctCol, output.length - 1, 1)
-      .setNumberFormat("0.00%");
-  }
+  const colOf   = name => keys.indexOf(name) + 1;
+  const fmtDate = "yyyy-MM-dd";
+  const fmtCur  = "$#,##0.00";
+  const fmtPct  = "0.00%";
+  const fmtInt  = "0";
 
+  // Date formatting
+  stateSheet
+    .getRange(2, colOf("BuyDt"), out.length - 1)
+    .setNumberFormat(fmtDate);
+
+  // Currency formatting
+  [
+    "BuyPx", "SellPx", "CostBasis", "ROC",
+    "AdjBasis", "CumIncome", "MktValue", "UnrealizedGainLoss"
+  ].forEach(name =>
+    stateSheet
+      .getRange(2, colOf(name), out.length - 1)
+      .setNumberFormat(fmtCur)
+  );
+
+  // Integer formatting
+  ["ShBuy","ShSold","ShRem","HeldDays"].forEach(name =>
+    stateSheet
+      .getRange(2, colOf(name), out.length - 1)
+      .setNumberFormat(fmtInt)
+  );
+
+  // Percentage formatting
+  stateSheet
+    .getRange(2, colOf("PctToExit"), out.length - 1)
+    .setNumberFormat(fmtPct);
+
+  // Layout refinements
   autoSizeAllColumns(stateSheet, 4);
   freezeHeaders(stateSheet);
 
-  // reapply your red gradient
-  addConBasisPctColorScale(stateSheet);
-}
-
-
-function addConBasisPctColorScale(sheet) {
-  // 1) Find header row and locate ConBasisPct
-  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-  const colIndex = headers.indexOf("ConBasisPct") + 1; // 1-based
-  
-  if (colIndex < 1) return;  // no ConBasisPct column, bail out
-  
-  // 2) Define the data range (excluding header)
-  const lastRow = sheet.getLastRow();
-  const dataRange = sheet.getRange(2, colIndex, lastRow - 1, 1);
-  
-  // 3) Build gradient rule: white→pink→dark red
-  const gradientRule = SpreadsheetApp
-    .newConditionalFormatRule()
-    .setGradientMinpointWithValue("#FFFFFF", SpreadsheetApp.InterpolationType.NUMBER, 0)
-    .setGradientMidpointWithValue("#FFCCCC", SpreadsheetApp.InterpolationType.NUMBER, 0.5)
-    .setGradientMaxpointWithValue("#FF0000", SpreadsheetApp.InterpolationType.NUMBER, 1)
-    .setRanges([dataRange])
-    .build();
-  
-  // 4) Append and reapply all rules
-  const rules = sheet.getConditionalFormatRules();
-  rules.push(gradientRule);
-  sheet.setConditionalFormatRules(rules);
-}
-
-
-
-/**
- * Formats the TrancheState sheet: dates, numbers, currency.
- */
-function formatTrancheStateSheet(sheet) {
-  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-  const colMap  = headers.reduce((m,h,i) => (m[h]=i+1, m), {});
-  const numRows = sheet.getLastRow();
-
-  const dateCols     = ["BuyDt"];
-  const currencyCols = ["BuyPx","SellPx","CurrPx","RemBasis","AdjBasis","ConBasis","MktVal","UnrlGain","ExitGain","RlzGain"];
-  const numCols      = ["ShBuy","ShSold","ShRem"];
-  const intCols      = ["HeldDays","LTGDays"];
-
-  dateCols.forEach(c => {
-    if (colMap[c]) sheet.getRange(2, colMap[c], numRows-1).setNumberFormat("yyyy-MM-dd");
-  });
-  currencyCols.forEach(c => {
-    if (colMap[c]) sheet.getRange(2, colMap[c], numRows-1).setNumberFormat("$#,##0.00");
-  });
-  numCols.forEach(c => {
-    if (colMap[c]) sheet.getRange(2, colMap[c], numRows-1).setNumberFormat("0.00");
-  });
-  intCols.forEach(c => {
-    if (colMap[c]) sheet.getRange(2, colMap[c], numRows-1).setNumberFormat("0");
-  });
+  // 7) Apply green-gradient to PctToExit (white @ 0%, green @ 100%)
+  const pctCol = colOf("PctToExit");
+  const lastRow = stateSheet.getLastRow();
+  if (lastRow > 1) {
+    const range = stateSheet.getRange(2, pctCol, lastRow - 1, 1);
+    const rules = stateSheet.getConditionalFormatRules();
+    const pctRule = SpreadsheetApp.newConditionalFormatRule()
+      .setGradientMinpointWithValue(
+        "#ffffff",
+        SpreadsheetApp.InterpolationType.NUMBER,
+        0
+      )
+      .setGradientMaxpointWithValue(
+        "#1a9850",
+        SpreadsheetApp.InterpolationType.NUMBER,
+        1
+      )
+      .setRanges([range])
+      .build();
+    rules.push(pctRule);
+    stateSheet.setConditionalFormatRules(rules);
+  }
 }

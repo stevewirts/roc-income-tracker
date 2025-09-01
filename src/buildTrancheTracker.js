@@ -64,15 +64,15 @@ function buildTrancheTracker() {
 
   const divs = rows.filter(r => String(r[idx.type]).toLowerCase() === "dividend");
 
-  // 5) Cross‐join dividends with open tranches
+  // 5) Cross-join dividends with open tranches
   const output = [];
   divs.forEach(rDiv => {
-    const sym     = rDiv[idx.sym];
-    const wkStart = Utilities.formatDate(new Date(rDiv[idx.wkStart]), tz, "yyyy-MM-dd");
+    const sym      = rDiv[idx.sym];
+    const wkStart  = Utilities.formatDate(new Date(rDiv[idx.wkStart]), tz, "yyyy-MM-dd");
     const distDt   = Utilities.formatDate(new Date(rDiv[idx.date]),    tz, "yyyy-MM-dd");
-    const distPS  = parseFloat(rDiv[idx.distPS]) || 0;
-    const incPS   = parseFloat(rDiv[idx.incPS])  || 0;
-    const rocPS   = parseFloat(rDiv[idx.rocPS])  || 0;
+    const distPS   = parseFloat(rDiv[idx.distPS]) || 0;
+    const incPS    = parseFloat(rDiv[idx.incPS])  || 0;
+    const rocPS    = parseFloat(rDiv[idx.rocPS])  || 0;
 
     buys.forEach(b => {
       if (b.sym === sym && b.remShr > 0 && String(b.tStat).toLowerCase() === "open") {
@@ -81,6 +81,7 @@ function buildTrancheTracker() {
         output.push([
           wkStart,
           distDt,
+          sym,          // ← new Sym column
           b.trID,
           b.costBase || 0,
           distPS,
@@ -96,32 +97,43 @@ function buildTrancheTracker() {
     });
   });
 
-  // 6) Sort by WkStart → DistDt → TrID
+  // 6) Sort by WkStart → DistDt → Sym → TrID
   output.sort((a, b) => {
-    const wk = new Date(a[0]) - new Date(b[0]);
-    if (wk) return wk;
-    const dt = new Date(a[1]) - new Date(b[1]);
-    if (dt) return dt;
-    return String(a[2]).localeCompare(b[2]);
+    const d1 = new Date(a[0]) - new Date(b[0]);
+    if (d1) return d1;
+    const d2 = new Date(a[1]) - new Date(b[1]);
+    if (d2) return d2;
+    const s  = String(a[2]).localeCompare(String(b[2]));
+    if (s) return s;
+    return String(a[3]).localeCompare(String(b[3]));
   });
 
   // 7) Write headers and data
   const headersOut = [
-    "WkStart", "DistDt", "TrID", "CostBasis",
-    "DistPS", "IncPS", "RocPS", "Inc", "ROCAmt",
-    "TotShr", "RemShr", "TStat"
+    "WkStart",
+    "DistDt",
+    "Sym",       // ← include Sym in headers
+    "TrID",
+    "CostBasis",
+    "DistPS",
+    "IncPS",
+    "RocPS",
+    "Inc",
+    "ROCAmt",
+    "TotShr",
+    "RemShr",
+    "TStat"
   ];
   outSheet.clearContents();
   outSheet.getRange(1, 1, 1, headersOut.length).setValues([headersOut]);
   if (output.length) {
-    outSheet.getRange(2, 1, output.length, headersOut.length)
-            .setValues(output);
+    outSheet.getRange(2, 1, output.length, headersOut.length).setValues(output);
   }
 
   // 8) Apply number/date formatting
   const formats = {
     WkStart   : "yyyy-MM-dd",
-    DistDt     : "yyyy-MM-dd",
+    DistDt    : "yyyy-MM-dd",
     CostBasis : "$#,##0.00",
     DistPS    : "$#,##0.0000",
     IncPS     : "$#,##0.0000",
@@ -137,7 +149,7 @@ function buildTrancheTracker() {
     }
   });
 
-  // 9) Zebra‐striping and highlight “Partial”
+  // 9) Zebra-striping and highlight “Partial”
   applyDividendColoring(outSheet, output, headersOut.length);
 
   // 10) Final housekeeping
@@ -145,6 +157,7 @@ function buildTrancheTracker() {
   autoSizeAllColumns(outSheet, 24);
   freezeHeaders(outSheet);
 }
+
 
 
 /**

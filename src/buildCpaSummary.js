@@ -1,13 +1,13 @@
 /**
  * Builds the CPA Summary sheet by reconciling BrokerROC, CpaNotes,
- * SyntheticDividends and Transactions. Wraps CPA_Note and Summary
+ * TrancheTracker and Transactions. Wraps CPA_Note and Summary
  * cells to avoid horizontal scrolling, and adds hover-notes to all headers.
  */
 function buildCpaSummary() {
   const ss           = SpreadsheetApp.getActiveSpreadsheet();
   const brokerSheet  = ss.getSheetByName("BrokerROC");
   const cpaSheet     = ss.getSheetByName("CpaNotes");
-  const synthSheet   = ss.getSheetByName("SyntheticDividends");
+  const synthSheet   = ss.getSheetByName("TrancheTracker");
   const txSheet      = ss.getSheetByName("Transactions");
 
   // Ensure CpaSummary exists and is cleared
@@ -21,27 +21,27 @@ function buildCpaSummary() {
   const brokerBox3Map    = buildNoteMap(brokerSheet, "Sym",    "Box3");
   const brokerNoteMap    = buildNoteMap(brokerSheet, "Sym",    "Note");
   const cpaNoteMap       = buildCpaNoteMap(cpaSheet);
-  const syntheticIncome  = buildSyntheticIncomeMap(synthSheet);
-  const actualRocMap     = buildActualRocMap(txSheet);
+  const trancheTrackerIncome  = buildTrancheTrackerMap(synthSheet);
+  const actualRocMap     = buildTransactionsRocMap(txSheet);
 
   // Union & sort all symbols
   const allSyms = Array.from(new Set([
     ...Object.keys(brokerBox3Map),
     ...Object.keys(brokerNoteMap),
     ...Object.keys(cpaNoteMap),
-    ...Object.keys(syntheticIncome),
+    ...Object.keys(trancheTrackerIncome),
     ...Object.keys(actualRocMap)
   ])).sort();
 
   // Build output rows
   const output = allSyms.map(sym => {
     const box3      = brokerBox3Map[sym]      || "";
-    const synthTot  = syntheticIncome[sym]?.TotInc || 0;
-    const synthRoc  = syntheticIncome[sym]?.ROCamt || 0;
+    const synthTot  = trancheTrackerIncome[sym]?.Inc || 0;
+    const synthRoc  = trancheTrackerIncome[sym]?.ROCamt || 0;
     const actualRoc = actualRocMap[sym]       || 0;
     const brokerNt  = brokerNoteMap[sym]      || "No broker note";
     const cpaNt     = cpaNoteMap[sym]         || "No CPA note";
-    const flag      = (synthRoc > synthTot) ? "⚠️ ROC > TotInc" : "";
+    const flag      = (synthRoc > synthTot) ? "⚠️ ROC > Inc" : "";
 
     return [
       sym,
@@ -60,9 +60,9 @@ function buildCpaSummary() {
   const headers = [
     "Sym",             // Ticker symbol
     "Box3",            // Broker-reported ROC from BrokerROC tab
-    "SyntheticTotInc", // Total synthetic income from SyntheticDividends
-    "SyntheticROC",    // Total synthetic ROC from SyntheticDividends
-    "ActualROC",       // ROC computed from Transactions
+    "Inc",             // Total income from TrancheTracker
+    "TrancheTrackerROC",// Total ROCAmt from TrancheTracker
+    "TransactionsROC", // ROC computed from Transactions
     "BasisAdjFlag",    // Warning flag if ROC > income
     "BrokerNote",      // Notes from BrokerROC tab
     "CPA_Note",        // Notes from CpaNotes tab
@@ -74,10 +74,10 @@ function buildCpaSummary() {
   const headerNotes = {
     Sym:             "Ticker symbol (Sym)",
     Box3:            "Box 3 non-dividend distributions from BrokerROC tab",
-    SyntheticTotInc: "Sum of TotInc from SyntheticDividends tab",
-    SyntheticROC:    "Sum of ROCamt from SyntheticDividends tab",
-    ActualROC:       "Sum of RocAmount from Transactions tab",
-    BasisAdjFlag:    "⚠️ if synthetic ROC exceeds synthetic income",
+    Inc:             "Sum of Inc from TrancheTracker tab",
+    TrancheTrackerROC:"Sum of ROCAmt from TrancheTracker tab",
+    TransactionsROC:  "Sum of ROCAmt from Transactions tab",
+    BasisAdjFlag:    "⚠️ if TrancheTracker ROC exceeds TrancheTracker income",
     BrokerNote:      "Note column from BrokerROC tab",
     CPA_Note:        "Aggregated CPA_Note values from CpaNotes tab",
     Summary:         "Concatenated summary of values and notes"
@@ -157,18 +157,18 @@ function buildCpaNoteMap(sheet) {
 
 
 /**
- * Reads { Sym, TotInc, ROCamt } from SyntheticDividends,
- * summing TotInc and ROCamt per symbol.
+ * Reads { Sym, Inc, ROCamt } from TrancheTracker,
+ * summing Inc and ROCamt per symbol.
  */
-function buildSyntheticIncomeMap(sheet) {
+function buildTrancheTrackerMap(sheet) {
   const rows = getSheetData(sheet);
   return rows.reduce((map, r) => {
     const sym    = r["Sym"];
-    const totInc = Number(r["TotInc"]) || 0;
-    const rocAmt = Number(r["ROCamt"]) || 0;
+    const inc = Number(r["Inc"]) || 0;
+    const rocAmt = Number(r["ROCAmt"]) || 0;
     if (!sym) return map;
-    if (!map[sym]) map[sym] = { TotInc: 0, ROCamt: 0 };
-    map[sym].TotInc += totInc;
+    if (!map[sym]) map[sym] = { Inc: 0, ROCamt: 0 };
+    map[sym].Inc += inc;
     map[sym].ROCamt += rocAmt;
     return map;
   }, {});
@@ -179,11 +179,11 @@ function buildSyntheticIncomeMap(sheet) {
  * Reads { Sym, RocAmount } from Transactions,
  * summing RocAmount per symbol.
  */
-function buildActualRocMap(sheet) {
+function buildTransactionsRocMap(sheet) {
   const rows = getSheetData(sheet);
   return rows.reduce((map, r) => {
     const sym = r["Sym"] || r["Symbol"];
-    const v   = Number(r["RocAmount"]) || 0;
+    const v   = Number(r["ROCAmt"]) || 0;
     if (!sym) return map;
     map[sym] = (map[sym] || 0) + v;
     return map;

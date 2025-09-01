@@ -166,8 +166,8 @@ function updateHistoricalTrancheMetrics() {
       .getRange(rowNum, fCols["WkStart"] + 1)
       .setValue(getWeekStart(dt));
 
-    // CostBasis for buy/sell
-    if (type === "buy" || type === "sell") {
+    // CostBasis for buy
+    if (type === "buy") {
       sheet
         .getRange(rowNum, fCols["CostBasis"] + 1)
         .setValue(sh * px);
